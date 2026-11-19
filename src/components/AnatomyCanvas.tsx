@@ -288,7 +288,7 @@ export const AnatomyCanvas: React.FC<AnatomyCanvasProps> = ({
     let isDisposed = false;
     const loader = new GLTFLoader();
     loader.load(
-      '/models/human-skeleton.glb',
+      `${import.meta.env.BASE_URL}models/human-skeleton.glb`,
       (gltf) => {
         if (isDisposed) return;
         const rawScene = gltf.scene;
