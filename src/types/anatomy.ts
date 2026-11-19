@@ -10,6 +10,14 @@ export type DissectionMode = 'regional' | 'peel';
 
 export type ImagingMode = 'realistic' | 'xray' | 'neurovascular';
 
+export type CameraPreset =
+  | 'default'
+  | 'anterior'
+  | 'posterior'
+  | 'left'
+  | 'right'
+  | 'superior';
+
 export interface SystemConfig {
   id: SystemId;
   nameEn: string;
@@ -32,6 +40,8 @@ export interface AnatomyPart {
   systemSublabel: string;
   chapter: number;
   center: [number, number, number];
+  pinAnchor?: [number, number, number];
+  pinSide?: -1 | 0 | 1;
   explodeOffset: [number, number, number];
   explodeRot: [number, number, number];
   stagger: [number, number];

@@ -10,6 +10,7 @@ import {
 } from '../data/anatomyDatabase';
 import { buildSculptedAnatomy, SculptedAnatomyResult } from '../three/AnatomySculptor';
 import {
+  CameraPreset,
   DissectionMode,
   ImagingMode,
   SystemId,
@@ -33,7 +34,11 @@ interface AnatomyCanvasProps {
   autoSpin: boolean;
   showPins: boolean;
   isPlaying: boolean;
+  cinemaMode: boolean;
   heartRateBpm: number;
+  cameraPreset: CameraPreset;
+  cameraPresetTick: number;
+  zoomCommand: { delta: number; tick: number } | null;
   onSelectPart: (partId: string | null) => void;
   onIsolatePart: (partId: string) => void;
   onModelReady: (loadedCount: number) => void;
@@ -60,7 +65,11 @@ export const AnatomyCanvas: React.FC<AnatomyCanvasProps> = ({
   autoSpin,
   showPins,
   isPlaying,
+  cinemaMode,
   heartRateBpm,
+  cameraPreset,
+  cameraPresetTick,
+  zoomCommand,
   onSelectPart,
   onIsolatePart,
   onModelReady,
@@ -88,7 +97,11 @@ export const AnatomyCanvas: React.FC<AnatomyCanvasProps> = ({
     autoSpin,
     showPins,
     isPlaying,
+    cinemaMode,
     heartRateBpm,
+    cameraPreset,
+    cameraPresetTick,
+    zoomCommand,
     hoveredId,
     onSelectPart,
     onIsolatePart,
@@ -107,7 +120,11 @@ export const AnatomyCanvas: React.FC<AnatomyCanvasProps> = ({
     autoSpin,
     showPins,
     isPlaying,
+    cinemaMode,
     heartRateBpm,
+    cameraPreset,
+    cameraPresetTick,
+    zoomCommand,
     hoveredId,
     onSelectPart,
     onIsolatePart,
@@ -439,14 +456,34 @@ export const AnatomyCanvas: React.FC<AnatomyCanvasProps> = ({
     const clock = new THREE.Clock();
     let physioTime = 0;
     let rafId = 0;
+    let lastPresetTick = 0;
+    let presetBlendTimer = 0;
+    let lastZoomTick = 0;
+
+    const handleControlStart = () => {
+      presetBlendTimer = 0;
+    };
+    controls.addEventListener('start', handleControlStart);
 
     const targetPos = new THREE.Vector3();
     const targetRot = new THREE.Euler();
     const desiredCamPos = new THREE.Vector3();
     const desiredLook = new THREE.Vector3();
+    const camOffsetVec = new THREE.Vector3();
     const box3 = new THREE.Box3();
     const boxCenter = new THREE.Vector3();
     const projV3 = new THREE.Vector3();
+
+    const PRESET_VIEWS: Record<
+      Exclude<CameraPreset, 'default'>,
+      { cam: [number, number, number]; look: [number, number, number] }
+    > = {
+      anterior: { cam: [0, -0.04, 5.75], look: [0, -0.06, 0] },
+      posterior: { cam: [0, -0.04, -5.75], look: [0, -0.06, 0] },
+      left: { cam: [5.75, -0.04, 0], look: [0, -0.06, 0] },
+      right: { cam: [-5.75, -0.04, 0], look: [0, -0.06, 0] },
+      superior: { cam: [0, 4.8, 1.5], look: [0, 0.25, 0] },
+    };
 
     const animate = () => {
       rafId = requestAnimationFrame(animate);
@@ -460,7 +497,7 @@ export const AnatomyCanvas: React.FC<AnatomyCanvasProps> = ({
       const activeChapterData = CHAPTERS[state.activeChapter] ?? CHAPTERS[0];
       const chapterHighlights = activeChapterData.highlights;
 
-      /* --- A. Update Dissection Offsets & Layer Visibility/Opacity --- */
+      /* --- A. Update Dissection Offsets (with Symmetric Bilateral Sub-Groups) --- */
       const peelEase = 1 - Math.pow(1 - state.scrollProgress, 2.5);
 
       ANATOMY_PARTS.forEach((part) => {
@@ -471,27 +508,30 @@ export const AnatomyCanvas: React.FC<AnatomyCanvasProps> = ({
         const isLayerActive = layerCfg?.active ?? true;
         const sysCfg = SYSTEM_MAP[part.system];
 
-        // Determine visibility during normal vs 360° Isolation Mode
         if (state.isolatedPartId) {
           const isTarget = part.id === state.isolatedPartId;
-          grp.visible = isTarget || (state.isolationGhostContext && isLayerActive && part.id !== 'skin_envelope');
+          grp.visible =
+            isTarget ||
+            (state.isolationGhostContext && isLayerActive && part.id !== 'skin_envelope');
         } else {
           grp.visible = isLayerActive;
         }
 
         if (!grp.visible) return;
 
-        // Compute Regional vs Layer-by-Layer Peel displacement
         const [stStart, stEnd] = part.stagger;
         const rawT = Math.max(
           0,
           Math.min(1, (state.scrollProgress - stStart) / Math.max(0.01, stEnd - stStart))
         );
         const easeOutT = 1 - Math.pow(1 - rawT, 3);
+        const isBilateral = Boolean(grp.userData.isBilateral);
+        const peelScale = state.dissectionMode === 'peel' ? 0.28 : 1.0;
 
         if (state.dissectionMode === 'peel' && sysCfg) {
           targetPos.set(
-            sysCfg.peelOffset[0] * peelEase + part.explodeOffset[0] * 0.28 * easeOutT,
+            sysCfg.peelOffset[0] * peelEase +
+              (isBilateral ? 0 : part.explodeOffset[0] * 0.28 * easeOutT),
             sysCfg.peelOffset[1] * peelEase + part.explodeOffset[1] * 0.28 * easeOutT,
             sysCfg.peelOffset[2] * peelEase + part.explodeOffset[2] * 0.28 * easeOutT
           );
@@ -502,7 +542,7 @@ export const AnatomyCanvas: React.FC<AnatomyCanvasProps> = ({
           );
         } else {
           targetPos.set(
-            part.explodeOffset[0] * easeOutT,
+            isBilateral ? 0 : part.explodeOffset[0] * easeOutT,
             part.explodeOffset[1] * easeOutT,
             part.explodeOffset[2] * easeOutT
           );
@@ -517,6 +557,21 @@ export const AnatomyCanvas: React.FC<AnatomyCanvasProps> = ({
         grp.rotation.x = THREE.MathUtils.lerp(grp.rotation.x, targetRot.x, Math.min(1, delta * 9));
         grp.rotation.y = THREE.MathUtils.lerp(grp.rotation.y, targetRot.y, Math.min(1, delta * 9));
         grp.rotation.z = THREE.MathUtils.lerp(grp.rotation.z, targetRot.z, Math.min(1, delta * 9));
+
+        if (isBilateral) {
+          const lateralMag = Math.abs(part.explodeOffset[0]) * peelScale * easeOutT;
+          for (let ci = 0; ci < grp.children.length; ci++) {
+            const sub = grp.children[ci];
+            const bSide = sub.userData.bilateralSide as number | undefined;
+            if (bSide === -1 || bSide === 1 || bSide === 0) {
+              sub.position.x = THREE.MathUtils.lerp(
+                sub.position.x,
+                bSide * lateralMag,
+                Math.min(1, delta * 9)
+              );
+            }
+          }
+        }
 
         /* --- B. Material Styling (Imaging Modes + Selection + Hover + Isolation Ghosting) --- */
         const isSelected = part.id === state.selectedPartId;
@@ -689,11 +744,11 @@ export const AnatomyCanvas: React.FC<AnatomyCanvasProps> = ({
         sculpted.animatedRefs.diaphragm.position.y = 123.5 - breathWave * 0.75;
       }
 
-      /* --- D. Camera Choreography & 360° Part Isolation Focus --- */
+      /* --- D. Camera Choreography, Presets & 360° Part Isolation Focus --- */
       const isDesktop = window.innerWidth >= 1024;
       const rightSpaceShift = isDesktop ? 0.62 : window.innerWidth >= 768 ? 0.35 : 0;
       const rootTargetX =
-        state.isolatedPartId || state.selectedPartId
+        state.isolatedPartId || state.selectedPartId || state.cinemaMode
           ? 0
           : rightSpaceShift;
 
@@ -707,11 +762,25 @@ export const AnatomyCanvas: React.FC<AnatomyCanvasProps> = ({
         );
       }
 
+      if (state.cameraPresetTick !== lastPresetTick) {
+        lastPresetTick = state.cameraPresetTick;
+        presetBlendTimer = 0.85;
+      }
+
+      if (state.zoomCommand && state.zoomCommand.tick !== lastZoomTick) {
+        lastZoomTick = state.zoomCommand.tick;
+        camOffsetVec.subVectors(camera.position, controls.target);
+        const factor = state.zoomCommand.delta > 0 ? 0.82 : 1.22;
+        const nextLen = Math.max(0.45, Math.min(8.2, camOffsetVec.length() * factor));
+        camOffsetVec.setLength(nextLen);
+        camera.position.copy(controls.target).add(camOffsetVec);
+      }
+
       if (state.autoSpin && !state.isolatedPartId) {
         anatomicalRoot.rotation.y += delta * 0.38;
       } else if (!state.isolatedPartId) {
         const idleBreathYaw =
-          state.scrollProgress < 0.08 && state.isPlaying
+          state.scrollProgress < 0.08 && state.isPlaying && state.cameraPreset === 'default'
             ? Math.sin(physioTime * 0.9) * 0.06
             : 0;
         anatomicalRoot.rotation.y = THREE.MathUtils.lerp(
@@ -725,6 +794,8 @@ export const AnatomyCanvas: React.FC<AnatomyCanvasProps> = ({
       const isolatedGroup = state.isolatedPartId
         ? allPartGroups[state.isolatedPartId]
         : null;
+
+      controls.enableZoom = Boolean(state.isolatedPartId) || state.cinemaMode;
 
       if (state.isolatedPartId && isolatedGroup) {
         controls.enabled = true;
@@ -759,32 +830,49 @@ export const AnatomyCanvas: React.FC<AnatomyCanvasProps> = ({
           controls.autoRotate = false;
         }
 
-        if (state.freeOrbit) {
+        const allowOrbit = state.freeOrbit || state.cinemaMode;
+        if (allowOrbit) {
           controls.enabled = true;
           controls.autoRotate = state.autoSpin;
-          controls.autoRotateSpeed = 1.6;
+          controls.autoRotateSpeed = 1.5;
+
+          if (presetBlendTimer > 0) {
+            presetBlendTimer = Math.max(0, presetBlendTimer - delta);
+            if (state.cameraPreset !== 'default') {
+              const pCfg = PRESET_VIEWS[state.cameraPreset];
+              desiredCamPos.set(pCfg.cam[0], pCfg.cam[1], pCfg.cam[2]);
+              desiredLook.set(pCfg.look[0], pCfg.look[1], pCfg.look[2]);
+            } else {
+              const camArr = activeChapterData.cam;
+              const lookArr = activeChapterData.look;
+              desiredCamPos.set(camArr[0], camArr[1], camArr[2]);
+              desiredLook.set(lookArr[0], lookArr[1], lookArr[2]);
+            }
+            camera.position.lerp(desiredCamPos, Math.min(1, delta * 5.2));
+            controls.target.lerp(desiredLook, Math.min(1, delta * 6.0));
+          }
           controls.update();
         } else {
           controls.enabled = false;
-          const camArr = activeChapterData.cam;
-          const lookArr = activeChapterData.look;
-          const zoomAdjust =
-            state.dissectionMode === 'peel' ? 1.55 : 1.0;
+          if (state.cameraPreset !== 'default') {
+            const pCfg = PRESET_VIEWS[state.cameraPreset];
+            desiredCamPos.set(pCfg.cam[0], pCfg.cam[1], pCfg.cam[2]);
+            desiredLook.set(pCfg.look[0], pCfg.look[1], pCfg.look[2]);
+          } else {
+            const camArr = activeChapterData.cam;
+            const lookArr = activeChapterData.look;
+            const zoomAdjust = state.dissectionMode === 'peel' ? 1.58 : 1.0;
+            desiredCamPos.set(camArr[0], camArr[1], camArr[2] * zoomAdjust);
+            desiredLook.set(lookArr[0], lookArr[1], lookArr[2]);
+          }
 
-          desiredCamPos.set(
-            camArr[0],
-            camArr[1],
-            camArr[2] * zoomAdjust
-          );
-          desiredLook.set(lookArr[0], lookArr[1], lookArr[2]);
-
-          camera.position.lerp(desiredCamPos, Math.min(1, delta * 3.8));
-          controls.target.lerp(desiredLook, Math.min(1, delta * 4.5));
+          camera.position.lerp(desiredCamPos, Math.min(1, delta * 4.0));
+          controls.target.lerp(desiredLook, Math.min(1, delta * 4.6));
           camera.lookAt(controls.target);
         }
       }
 
-      /* --- E. Project 3D Floating Pins directly to DOM without React Re-Renders --- */
+      /* --- E. Project 3D Floating Pins + 2D Screen-Space De-Overlapping --- */
       const pinsRoot = pinsRef.current;
       if (pinsRoot) {
         if (!state.showPins || (state.scrollProgress < 0.05 && !state.isolatedPartId)) {
@@ -794,9 +882,11 @@ export const AnatomyCanvas: React.FC<AnatomyCanvasProps> = ({
           pinsRoot.style.opacity = '1';
           const w = window.innerWidth;
           const h = window.innerHeight;
-          const isLab = state.activeChapter === 6;
+          const isLab = state.activeChapter === 6 || state.cinemaMode;
 
+          const visiblePins: Array<{ el: HTMLElement; sx: number; sy: number }> = [];
           const pinNodes = pinsRoot.children;
+
           for (let i = 0; i < pinNodes.length; i++) {
             const el = pinNodes[i] as HTMLElement;
             const pid = el.dataset.partId;
@@ -824,10 +914,22 @@ export const AnatomyCanvas: React.FC<AnatomyCanvasProps> = ({
               continue;
             }
 
+            const anchor = part.pinAnchor ?? part.center;
+            let sideShiftX = 0;
+            if (grp.userData.isBilateral) {
+              const targetSide = part.pinSide ?? 0;
+              for (let ci = 0; ci < grp.children.length; ci++) {
+                if (grp.children[ci].userData.bilateralSide === targetSide) {
+                  sideShiftX = grp.children[ci].position.x;
+                  break;
+                }
+              }
+            }
+
             projV3.set(
-              part.center[0] + grp.position.x,
-              part.center[1] + 2.5 + grp.position.y,
-              part.center[2] + grp.position.z
+              anchor[0] + grp.position.x + sideShiftX,
+              anchor[1] + 2.5 + grp.position.y,
+              anchor[2] + grp.position.z
             );
             projV3.applyMatrix4(anatomicalRoot.matrixWorld);
             projV3.project(camera);
@@ -840,14 +942,32 @@ export const AnatomyCanvas: React.FC<AnatomyCanvasProps> = ({
             const sx = (projV3.x * 0.5 + 0.5) * w;
             const sy = (-projV3.y * 0.5 + 0.5) * h;
 
-            if (sx < 24 || sx > w - 24 || sy < 68 || sy > h - 24) {
+            if (sx < 24 || sx > w - 24 || sy < 68 || sy > h - 32) {
               el.style.display = 'none';
               continue;
             }
 
-            el.style.display = 'inline-flex';
-            el.style.left = `${sx.toFixed(1)}px`;
-            el.style.top = `${sy.toFixed(1)}px`;
+            visiblePins.push({ el, sx, sy });
+          }
+
+          // 2-pass screen-space de-overlapping sweep
+          visiblePins.sort((a, b) => a.sy - b.sy);
+          for (let pass = 0; pass < 2; pass++) {
+            for (let i = 1; i < visiblePins.length; i++) {
+              const cur = visiblePins[i];
+              for (let j = 0; j < i; j++) {
+                const prev = visiblePins[j];
+                if (Math.abs(cur.sx - prev.sx) < 92 && Math.abs(cur.sy - prev.sy) < 28) {
+                  cur.sy = Math.min(h - 36, prev.sy + 29);
+                }
+              }
+            }
+          }
+
+          for (const pin of visiblePins) {
+            pin.el.style.display = 'inline-flex';
+            pin.el.style.left = `${pin.sx.toFixed(1)}px`;
+            pin.el.style.top = `${pin.sy.toFixed(1)}px`;
           }
         }
       }
@@ -868,6 +988,7 @@ export const AnatomyCanvas: React.FC<AnatomyCanvasProps> = ({
       isDisposed = true;
       cancelAnimationFrame(rafId);
       window.removeEventListener('resize', handleResize);
+      controls.removeEventListener('start', handleControlStart);
       domEl.removeEventListener('pointerdown', handlePointerDown);
       domEl.removeEventListener('pointermove', handlePointerMove);
       domEl.removeEventListener('pointerup', handlePointerUp);

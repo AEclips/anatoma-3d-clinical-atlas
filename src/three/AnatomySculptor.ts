@@ -158,10 +158,92 @@ function makeTubeMesh(
   return new THREE.Mesh(geom, material);
 }
 
+/**
+ * Generates an in-memory procedural bump map for organic tissue, striated muscle, and cerebral cortex.
+ */
+function createTissueBumpTexture(kind: 'brain' | 'muscle' | 'organ'): THREE.CanvasTexture {
+  const size = 128;
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext('2d');
+  if (ctx) {
+    ctx.fillStyle = '#808080';
+    ctx.fillRect(0, 0, size, size);
+    const img = ctx.getImageData(0, 0, size, size);
+    const d = img.data;
+    for (let y = 0; y < size; y++) {
+      for (let x = 0; x < size; x++) {
+        let v = 128;
+        if (kind === 'muscle') {
+          // Fine longitudinal myofibril striations
+          const fiber = Math.sin(x * 0.72) * 32 + Math.sin(x * 1.45 + y * 0.12) * 14;
+          v = 128 + fiber;
+        } else if (kind === 'brain') {
+          // Micro-vascular & sulcal grain
+          const fold = Math.sin(x * 0.25 + Math.cos(y * 0.22) * 2.5) * 34;
+          v = 128 + fold;
+        } else {
+          // Lobular cellular mottling for visceral organs
+          const cell =
+            Math.sin(x * 0.35) * Math.cos(y * 0.35) * 24 +
+            Math.sin((x + y) * 0.55) * 12;
+          v = 128 + cell;
+        }
+        const c = Math.max(0, Math.min(255, Math.round(v)));
+        const idx = (y * size + x) * 4;
+        d[idx] = c;
+        d[idx + 1] = c;
+        d[idx + 2] = c;
+        d[idx + 3] = 255;
+      }
+    }
+    ctx.putImageData(img, 0, 0);
+  }
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.wrapS = THREE.RepeatWrapping;
+  tex.wrapT = THREE.RepeatWrapping;
+  tex.repeat.set(kind === 'muscle' ? 3 : 2, kind === 'muscle' ? 3 : 2);
+  return tex;
+}
+
+/**
+ * Creates a bilateral parent group containing separate anatomical Right (-X),
+ * Left (+X), and Midline (0) sub-groups so lateral explosion never crosses the midline.
+ */
+function createBilateralGroup() {
+  const grp = new THREE.Group();
+  grp.userData.isBilateral = true;
+
+  const rightGrp = new THREE.Group();
+  rightGrp.userData.bilateralSide = -1;
+
+  const leftGrp = new THREE.Group();
+  leftGrp.userData.bilateralSide = 1;
+
+  const centerGrp = new THREE.Group();
+  centerGrp.userData.bilateralSide = 0;
+
+  grp.add(rightGrp, leftGrp, centerGrp);
+  return {
+    grp,
+    rightGrp,
+    leftGrp,
+    centerGrp,
+    sideGroup: (side: number) => (side < 0 ? rightGrp : leftGrp),
+  };
+}
+
 export function buildSculptedAnatomy(): SculptedAnatomyResult {
   const partGroups: Record<string, THREE.Group> = {};
   const animatedRefs: SculptedAnatomyResult['animatedRefs'] = {};
   const geometries: THREE.BufferGeometry[] = [];
+  const textures: THREE.Texture[] = [
+    createTissueBumpTexture('brain'),
+    createTissueBumpTexture('muscle'),
+    createTissueBumpTexture('organ'),
+  ];
+  const [brainBumpTex, muscleBumpTex, organBumpTex] = textures;
 
   const trackGeom = <T extends THREE.Group>(grp: T): T => {
     grp.traverse((child) => {
@@ -177,10 +259,12 @@ export function buildSculptedAnatomy(): SculptedAnatomyResult {
     color: 0xe6b8af,
     emissive: 0x3b1818,
     emissiveIntensity: 0.14,
-    roughness: 0.42,
+    roughness: 0.4,
     metalness: 0.02,
     clearcoat: 0.45,
     clearcoatRoughness: 0.35,
+    bumpMap: brainBumpTex,
+    bumpScale: 0.09,
     transparent: true,
     opacity: 1.0,
   });
@@ -222,10 +306,12 @@ export function buildSculptedAnatomy(): SculptedAnatomyResult {
     color: 0x991b1b,
     emissive: 0x450a0a,
     emissiveIntensity: 0.2,
-    roughness: 0.5,
+    roughness: 0.48,
     metalness: 0.06,
     clearcoat: 0.28,
     clearcoatRoughness: 0.45,
+    bumpMap: muscleBumpTex,
+    bumpScale: 0.14,
     transparent: true,
     opacity: 0.88,
   });
@@ -241,11 +327,13 @@ export function buildSculptedAnatomy(): SculptedAnatomyResult {
   const heartMat = new THREE.MeshPhysicalMaterial({
     color: 0x9f1239,
     emissive: 0x4c0519,
-    emissiveIntensity: 0.32,
-    roughness: 0.28,
+    emissiveIntensity: 0.3,
+    roughness: 0.26,
     metalness: 0.05,
     clearcoat: 0.72,
     clearcoatRoughness: 0.22,
+    bumpMap: muscleBumpTex,
+    bumpScale: 0.06,
     transparent: true,
     opacity: 1.0,
   });
@@ -254,10 +342,12 @@ export function buildSculptedAnatomy(): SculptedAnatomyResult {
     color: 0xd99b96,
     emissive: 0x3f1d1d,
     emissiveIntensity: 0.14,
-    roughness: 0.56,
+    roughness: 0.54,
     metalness: 0.02,
     clearcoat: 0.25,
     clearcoatRoughness: 0.5,
+    bumpMap: organBumpTex,
+    bumpScale: 0.1,
     transparent: true,
     opacity: 1.0,
   });
@@ -274,10 +364,12 @@ export function buildSculptedAnatomy(): SculptedAnatomyResult {
     color: 0x7c2d12,
     emissive: 0x2e1005,
     emissiveIntensity: 0.2,
-    roughness: 0.26,
+    roughness: 0.24,
     metalness: 0.04,
-    clearcoat: 0.65,
-    clearcoatRoughness: 0.25,
+    clearcoat: 0.68,
+    clearcoatRoughness: 0.24,
+    bumpMap: organBumpTex,
+    bumpScale: 0.05,
     transparent: true,
     opacity: 1.0,
   });
@@ -296,8 +388,10 @@ export function buildSculptedAnatomy(): SculptedAnatomyResult {
     color: 0xd97757,
     emissive: 0x431407,
     emissiveIntensity: 0.18,
-    roughness: 0.38,
+    roughness: 0.36,
     clearcoat: 0.45,
+    bumpMap: organBumpTex,
+    bumpScale: 0.07,
     transparent: true,
     opacity: 1.0,
   });
@@ -306,8 +400,10 @@ export function buildSculptedAnatomy(): SculptedAnatomyResult {
     color: 0x881337,
     emissive: 0x310817,
     emissiveIntensity: 0.22,
-    roughness: 0.26,
-    clearcoat: 0.62,
+    roughness: 0.24,
+    clearcoat: 0.65,
+    bumpMap: organBumpTex,
+    bumpScale: 0.06,
     transparent: true,
     opacity: 1.0,
   });
@@ -316,8 +412,10 @@ export function buildSculptedAnatomy(): SculptedAnatomyResult {
     color: 0xe6a18a,
     emissive: 0x451a12,
     emissiveIntensity: 0.14,
-    roughness: 0.4,
+    roughness: 0.38,
     clearcoat: 0.42,
+    bumpMap: organBumpTex,
+    bumpScale: 0.07,
     transparent: true,
     opacity: 1.0,
   });
@@ -326,8 +424,10 @@ export function buildSculptedAnatomy(): SculptedAnatomyResult {
     color: 0xc27864,
     emissive: 0x3b1810,
     emissiveIntensity: 0.16,
-    roughness: 0.44,
+    roughness: 0.42,
     clearcoat: 0.35,
+    bumpMap: organBumpTex,
+    bumpScale: 0.08,
     transparent: true,
     opacity: 1.0,
   });
@@ -401,72 +501,164 @@ export function buildSculptedAnatomy(): SculptedAnatomyResult {
   }
 
   /* ============================================================================
-     3. HUMAN HEART & CORONARY GREAT ROOTS (LEFT-TILTED MULTI-CHAMBER)
+     3. HUMAN HEART & CORONARY GREAT ROOTS (FLUSH EPICARDIAL VESSELS)
      ============================================================================ */
   {
     const grp = new THREE.Group();
     const beatPivot = new THREE.Group();
     beatPivot.position.set(1.55, 133.5, 1.85);
 
-    // Ventricular Cone (apex pointing down, forward, and anatomical left +X)
-    const ventGeom = new THREE.SphereGeometry(3.1, 28, 22);
+    // Ventricular Cone + Flush Epicardial Coronary Vessels inside same rotated frame
+    const ventPivot = new THREE.Group();
+    ventPivot.rotation.set(0.2, 0, -0.46);
+
+    const rx = 3.1 * 0.9;
+    const ry = 3.1 * 1.28;
+    const rz = 3.1 * 0.82;
+    const ventGeom = new THREE.SphereGeometry(3.1, 30, 24);
     ventGeom.scale(0.9, 1.28, 0.82);
     const vent = new THREE.Mesh(ventGeom, heartMat);
-    vent.rotation.z = -0.48;
-    vent.rotation.x = 0.22;
-    beatPivot.add(vent);
+    ventPivot.add(vent);
 
-    // Right & Left Atria
-    const rAtrium = new THREE.Mesh(new THREE.SphereGeometry(1.75, 18, 16), heartMat);
-    rAtrium.position.set(-2.0, 1.8, 0.3);
+    // Helper: projects spherical angles (phi from top, theta around Y) flush onto ventricular surface
+    const ventSurf = (phi: number, theta: number, radialMul = 0.99): [number, number, number] => [
+      rx * radialMul * Math.sin(phi) * Math.sin(theta),
+      ry * radialMul * Math.cos(phi),
+      rz * radialMul * Math.sin(phi) * Math.cos(theta),
+    ];
+
+    // LAD Coronary Artery descending anterior interventricular sulcus flush on myocardium
+    const lad = makeTubeMesh(
+      [
+        ventSurf(0.55, 0.08, 1.0),
+        ventSurf(0.95, 0.14, 1.0),
+        ventSurf(1.45, 0.18, 1.0),
+        ventSurf(2.05, 0.2, 1.0),
+        ventSurf(2.55, 0.15, 0.99),
+      ],
+      0.13,
+      18,
+      arteryMat,
+      6
+    );
+    ventPivot.add(lad);
+
+    // Diagonal branch off LAD
+    const diagBranch = makeTubeMesh(
+      [
+        ventSurf(1.15, 0.16, 1.0),
+        ventSurf(1.55, 0.55, 1.0),
+        ventSurf(1.95, 0.85, 0.99),
+      ],
+      0.09,
+      10,
+      arteryMat,
+      6
+    );
+    ventPivot.add(diagBranch);
+
+    // Circumflex (LCx) & Right Coronary Artery (RCA) wrapping coronary sulcus
+    const lcx = makeTubeMesh(
+      [
+        ventSurf(0.55, 0.1, 1.0),
+        ventSurf(0.75, 0.78, 1.0),
+        ventSurf(0.9, 1.55, 1.0),
+        ventSurf(1.05, 2.25, 0.99),
+      ],
+      0.11,
+      14,
+      arteryMat,
+      6
+    );
+    ventPivot.add(lcx);
+
+    const rca = makeTubeMesh(
+      [
+        ventSurf(0.58, -0.15, 1.0),
+        ventSurf(0.85, -0.85, 1.0),
+        ventSurf(1.15, -1.45, 1.0),
+        ventSurf(1.55, -1.85, 0.99),
+      ],
+      0.12,
+      14,
+      arteryMat,
+      6
+    );
+    ventPivot.add(rca);
+
+    beatPivot.add(ventPivot);
+
+    // Right & Left Atria + Auricles
+    const rAtrium = new THREE.Mesh(new THREE.SphereGeometry(1.72, 18, 16), heartMat);
+    rAtrium.position.set(-1.95, 1.85, 0.25);
     beatPivot.add(rAtrium);
 
-    const lAtrium = new THREE.Mesh(new THREE.SphereGeometry(1.6, 18, 16), heartMat);
-    lAtrium.position.set(1.3, 2.2, -0.8);
+    const lAtrium = new THREE.Mesh(new THREE.SphereGeometry(1.58, 18, 16), heartMat);
+    lAtrium.position.set(1.25, 2.15, -0.75);
     beatPivot.add(lAtrium);
 
-    // Ascending Aortic Root & Pulmonary Trunk
+    // Ascending Aortic Root + Arch + 3 Supra-aortic Branches
     const aortaRoot = makeTubeMesh(
       [
         [0.0, 1.8, 0.2],
-        [-0.3, 4.2, 0.4],
-        [0.8, 6.2, -0.2],
-        [1.4, 5.4, -1.6],
+        [-0.25, 4.1, 0.35],
+        [0.65, 5.8, -0.25],
+        [1.35, 5.1, -1.55],
       ],
-      0.85,
-      16,
+      0.82,
+      18,
       arteryMat,
       10
     );
     beatPivot.add(aortaRoot);
 
+    // Brachiocephalic, Left Common Carotid & Left Subclavian stubs
+    [
+      { x0: -0.05, y0: 5.1, z0: 0.15, dx: -0.45, dy: 1.45 },
+      { x0: 0.45, y0: 5.75, z0: -0.15, dx: 0.1, dy: 1.4 },
+      { x0: 0.95, y0: 5.55, z0: -0.55, dx: 0.55, dy: 1.3 },
+    ].forEach((b) => {
+      beatPivot.add(
+        makeTubeMesh(
+          [
+            [b.x0, b.y0, b.z0],
+            [b.x0 + b.dx, b.y0 + b.dy, b.z0 - 0.1],
+          ],
+          0.26,
+          6,
+          arteryMat,
+          6
+        )
+      );
+    });
+
+    // Pulmonary Trunk Bifurcation
     const pulmTrunk = makeTubeMesh(
       [
-        [-0.6, 1.5, 1.2],
-        [0.6, 4.2, 1.0],
-        [2.2, 4.8, 0.1],
+        [-0.55, 1.45, 1.15],
+        [0.55, 4.05, 0.95],
+        [2.05, 4.55, 0.1],
       ],
-      0.72,
-      12,
+      0.7,
+      14,
       veinMat,
       10
     );
     beatPivot.add(pulmTrunk);
 
-    // Epicardial LAD Coronary Artery wrapping the anterior sulcus
-    const lad = makeTubeMesh(
-      [
-        [0.1, 2.4, 1.8],
-        [0.7, 0.4, 2.45],
-        [1.4, -1.8, 2.25],
-        [1.9, -3.2, 1.75],
-      ],
-      0.16,
-      14,
-      arteryMat,
-      6
+    // Superior & Inferior Vena Cava Entry Stumps
+    beatPivot.add(
+      makeTubeMesh(
+        [
+          [-2.05, 2.3, 0.15],
+          [-2.15, 5.2, 0.0],
+        ],
+        0.58,
+        8,
+        veinMat,
+        8
+      )
     );
-    beatPivot.add(lad);
 
     grp.add(beatPivot);
     animatedRefs.heartGroup = beatPivot;
@@ -478,9 +670,9 @@ export function buildSculptedAnatomy(): SculptedAnatomyResult {
      4. BILATERAL LUNGS & CARTILAGINOUS TRACHEA
      ============================================================================ */
   {
-    const grp = new THREE.Group();
+    const { grp, rightGrp, leftGrp, centerGrp, sideGroup } = createBilateralGroup();
 
-    // Trachea & Primary Bronchi
+    // Trachea (Midline)
     const trachea = makeTubeMesh(
       [
         [0, 159.5, -0.6],
@@ -492,17 +684,17 @@ export function buildSculptedAnatomy(): SculptedAnatomyResult {
       cartilageMat,
       12
     );
-    grp.add(trachea);
+    centerGrp.add(trachea);
 
     // Tracheal C-Rings
     for (let y = 146.5; y <= 158.5; y += 1.2) {
       const ring = new THREE.Mesh(new THREE.TorusGeometry(0.95, 0.14, 6, 16), cartilageMat);
       ring.rotation.x = Math.PI / 2;
       ring.position.set(0, y, -0.9);
-      grp.add(ring);
+      centerGrp.add(ring);
     }
 
-    // Left & Right Primary Bronchi
+    // Left & Right Primary Bronchi (attached to their respective lung sub-group)
     [-1, 1].forEach((side) => {
       const bronchus = makeTubeMesh(
         [
@@ -515,15 +707,14 @@ export function buildSculptedAnatomy(): SculptedAnatomyResult {
         cartilageMat,
         8
       );
-      grp.add(bronchus);
+      sideGroup(side).add(bronchus);
     });
 
-    // Right Lung (-X, 3-lobed, slightly wider & shorter due to liver dome)
+    // Right Lung (-X, 3-lobed)
     const rLungGrp = new THREE.Group();
     rLungGrp.position.set(-5.6, 136.5, -1.3);
     const rLungGeom = new THREE.SphereGeometry(4.6, 26, 22);
     rLungGeom.scale(0.86, 2.25, 1.15);
-    // Flatten inferior diaphragmatic base & sculpt medial mediastinal face
     const rPos = rLungGeom.attributes.position;
     for (let i = 0; i < rPos.count; i++) {
       const x = rPos.getX(i);
@@ -537,10 +728,10 @@ export function buildSculptedAnatomy(): SculptedAnatomyResult {
     rPos.needsUpdate = true;
     applyOrganicDisplacement(rLungGeom, 0.18, 0.9, 1.4, 0.9, 1.0);
     rLungGrp.add(new THREE.Mesh(rLungGeom, lungMat));
-    grp.add(rLungGrp);
+    rightGrp.add(rLungGrp);
     animatedRefs.rightLung = rLungGrp;
 
-    // Left Lung (+X, 2-lobed, narrower with cardiac notch)
+    // Left Lung (+X, 2-lobed with cardiac notch)
     const lLungGrp = new THREE.Group();
     lLungGrp.position.set(5.8, 137.0, -1.3);
     const lLungGeom = new THREE.SphereGeometry(4.4, 26, 22);
@@ -552,7 +743,6 @@ export function buildSculptedAnatomy(): SculptedAnatomyResult {
       const z = lPos.getZ(i);
       const taperTop = y > 0 ? 1 - (y / 12.5) * 0.45 : 1 + (-y / 16) * 0.12;
       const flatBase = y < -8.4 ? -8.4 + (y + 8.4) * 0.18 : y;
-      // Carve cardiac notch on medial-inferior-anterior margin (-X side of left lung)
       if (x < -0.5 && y < 1.5 && z > -1.5) {
         x += 1.45 * Math.exp(-Math.pow((y + 3.2) / 4.0, 2));
       }
@@ -561,7 +751,7 @@ export function buildSculptedAnatomy(): SculptedAnatomyResult {
     lPos.needsUpdate = true;
     applyOrganicDisplacement(lLungGeom, 0.18, 0.9, 1.4, 0.9, 1.0);
     lLungGrp.add(new THREE.Mesh(lLungGeom, lungMat));
-    grp.add(lLungGrp);
+    leftGrp.add(lLungGrp);
     animatedRefs.leftLung = lLungGrp;
 
     tagPartGroup(grp, 'organ_lungs');
@@ -680,9 +870,9 @@ export function buildSculptedAnatomy(): SculptedAnatomyResult {
      8. KIDNEYS, ADRENAL GLANDS & URETERS
      ============================================================================ */
   {
-    const grp = new THREE.Group();
+    const { grp, sideGroup } = createBilateralGroup();
     [-1, 1].forEach((side) => {
-      // Right kidney (-X) sits ~1.2 cm lower under liver
+      const target = sideGroup(side);
       const yBase = side === -1 ? 111.2 : 112.6;
       const kGeom = new THREE.SphereGeometry(2.15, 22, 18);
       kGeom.scale(0.85, 1.48, 0.72);
@@ -690,7 +880,6 @@ export function buildSculptedAnatomy(): SculptedAnatomyResult {
       for (let i = 0; i < kPos.count; i++) {
         let x = kPos.getX(i);
         const y = kPos.getY(i);
-        // Medial hilum indentation
         const isMedial = (side === -1 && x > 0.4) || (side === 1 && x < -0.4);
         if (isMedial && Math.abs(y) < 1.6) {
           x *= 0.65;
@@ -703,15 +892,13 @@ export function buildSculptedAnatomy(): SculptedAnatomyResult {
       const kidney = new THREE.Mesh(kGeom, kidneyMat);
       kidney.position.set(side * 4.5, yBase, -3.6);
       kidney.rotation.z = side * -0.14;
-      grp.add(kidney);
+      target.add(kidney);
 
-      // Suprarenal (Adrenal) Gland cap
       const adrenal = new THREE.Mesh(new THREE.ConeGeometry(1.1, 1.3, 10), nerveMat);
       adrenal.position.set(side * 4.1, yBase + 3.4, -3.5);
       adrenal.rotation.z = side * 0.2;
-      grp.add(adrenal);
+      target.add(adrenal);
 
-      // Ureter descending to pelvic cavity
       const ureter = makeTubeMesh(
         [
           [side * 3.4, yBase - 0.3, -3.3],
@@ -723,7 +910,7 @@ export function buildSculptedAnatomy(): SculptedAnatomyResult {
         tendonMat,
         6
       );
-      grp.add(ureter);
+      target.add(ureter);
     });
 
     tagPartGroup(grp, 'organ_kidneys');
@@ -731,43 +918,41 @@ export function buildSculptedAnatomy(): SculptedAnatomyResult {
   }
 
   /* ============================================================================
-     9. SMALL & LARGE INTESTINES (HAUSTRATED COLON + JEJUNAL/ILEAL COILS)
+     9. SMALL & LARGE INTESTINES (HAUSTRATED COLON + SMOOTH 48-PT JEJUNAL/ILEAL COIL)
      ============================================================================ */
   {
     const grp = new THREE.Group();
 
-    // Haustrated Framing Colon (Cecum -> Asc -> Trans -> Desc -> Sigmoid)
     const colon = makeVariableTube(
       [
-        [-6.0, 96.5, 1.4], // Cecum (RLQ)
-        [-6.6, 103.5, 1.2], // Ascending colon
-        [-5.8, 109.8, 2.2], // Hepatic flexure
-        [0.0, 109.2, 3.4], // Transverse colon dip
-        [6.2, 111.2, 1.8], // Splenic flexure
-        [6.5, 103.0, 1.0], // Descending colon
-        [4.8, 95.8, 1.2], // Sigmoid loop
-        [0.2, 93.2, -1.6], // Rectum
+        [-6.0, 96.5, 1.4],
+        [-6.6, 103.5, 1.2],
+        [-5.8, 109.8, 2.2],
+        [0.0, 109.2, 3.4],
+        [6.2, 111.2, 1.8],
+        [6.5, 103.0, 1.0],
+        [4.8, 95.8, 1.2],
+        [0.2, 93.2, -1.6],
       ],
-      (t) => 1.35 + 0.22 * Math.sin(t * Math.PI * 36), // Haustra segmentation
+      (t) => 1.35 + 0.22 * Math.sin(t * Math.PI * 36),
       72,
       12,
       intestineLargeMat
     );
     grp.add(colon);
 
-    // Small Intestine Multi-Loop Cluster inside Colon Frame
-    const smallPts: [number, number, number][] = [
-      [-1.2, 110.5, 0.2], // Duodenum
-      [2.6, 108.0, 1.8],
-      [-3.4, 106.4, 2.2],
-      [3.6, 104.2, 2.5],
-      [-3.8, 102.0, 2.2],
-      [3.5, 100.0, 2.4],
-      [-3.4, 98.0, 1.9],
-      [2.8, 96.4, 1.8],
-      [-4.8, 96.6, 1.5], // Ileocecal junction
-    ];
-    const smallInt = makeTubeMesh(smallPts, 0.92, 84, intestineSmallMat, 10);
+    // Smooth 48-point organic small-intestine coil nested inside colon frame
+    const smallPts: [number, number, number][] = [];
+    const totalPts = 48;
+    for (let i = 0; i < totalPts; i++) {
+      const t = i / (totalPts - 1);
+      const y = 109.6 - t * 13.0;
+      const x = Math.sin(t * Math.PI * 7.5) * (3.7 - Math.abs(t - 0.5) * 1.1);
+      const z = 1.65 + Math.cos(t * Math.PI * 15) * 0.75 + Math.sin(t * Math.PI) * 0.65;
+      smallPts.push([x, y, z]);
+    }
+    smallPts.push([-4.9, 96.6, 1.4]); // Ileocecal termination
+    const smallInt = makeTubeMesh(smallPts, 0.88, 120, intestineSmallMat, 10);
     grp.add(smallInt);
 
     tagPartGroup(grp, 'organ_intestines');
@@ -823,53 +1008,55 @@ export function buildSculptedAnatomy(): SculptedAnatomyResult {
      11. BRACHIAL PLEXUS & UPPER LIMB NERVES (ALIGNED TO TRUE GLB ARM BONES)
      ============================================================================ */
   {
-    const grp = new THREE.Group();
+    const { grp, sideGroup } = createBilateralGroup();
     [-1, 1].forEach((side) => {
-      // Median + Ulnar + Radial main brachial path
+      const target = sideGroup(side);
+      // Median + Ulnar + Radial main brachial path hugging glenoid -> humerus -> elbow -> forearm -> carpus
       const median = makeTubeMesh(
         [
-          [side * 1.6, 152.0, -5.2],
-          [side * 9.5, 144.8, -5.2],
-          [side * 19.6, 134.0, -5.4],
-          [side * 25.0, 118.5, -4.2],
-          [side * 28.2, 104.0, -2.8],
-          [side * 30.8, 86.0, 0.3],
+          [side * 2.2, 152.5, -5.0],
+          [side * 10.6, 144.8, -5.6],
+          [side * 17.5, 140.2, -5.8],
+          [side * 20.4, 133.8, -5.4],
+          [side * 24.2, 120.2, -4.8],
+          [side * 27.6, 106.8, -3.5],
+          [side * 30.8, 86.0, 0.2],
         ],
         0.26,
-        28,
+        32,
         nerveMat,
         7
       );
-      grp.add(median);
+      target.add(median);
 
       const radial = makeTubeMesh(
         [
-          [side * 9.8, 144.2, -6.2],
-          [side * 21.0, 134.5, -7.2],
-          [side * 24.4, 120.5, -4.8],
-          [side * 28.5, 107.0, -4.5],
-          [side * 31.4, 88.5, -0.4],
+          [side * 10.6, 144.5, -6.2],
+          [side * 17.8, 140.0, -6.6],
+          [side * 21.0, 134.2, -7.0],
+          [side * 24.4, 120.5, -5.0],
+          [side * 28.4, 107.0, -4.4],
+          [side * 31.3, 88.2, -0.4],
         ],
         0.2,
-        24,
+        28,
         nerveMat,
         6
       );
-      grp.add(radial);
+      target.add(radial);
 
-      // Digital nerve twigs fanning into fingers
       [-0.8, 0, 0.8].forEach((dz) => {
         const digit = makeTubeMesh(
           [
-            [side * 30.8, 86.0, 0.3],
-            [side * 31.5, 81.2, 0.3 + dz * 1.8],
+            [side * 30.8, 86.0, 0.2],
+            [side * 31.4, 81.2, 0.2 + dz * 1.8],
           ],
           0.11,
           6,
           nerveMat,
           5
         );
-        grp.add(digit);
+        target.add(digit);
       });
     });
 
@@ -881,9 +1068,9 @@ export function buildSculptedAnatomy(): SculptedAnatomyResult {
      12. SCIATIC & FEMORAL NERVE TRUNKS (ALIGNED TO TRUE GLB LEG BONES)
      ============================================================================ */
   {
-    const grp = new THREE.Group();
+    const { grp, sideGroup } = createBilateralGroup();
     [-1, 1].forEach((side) => {
-      // Posterior Sciatic -> Tibial Nerve
+      const target = sideGroup(side);
       const sciatic = makeTubeMesh(
         [
           [side * 3.8, 97.5, -4.8],
@@ -898,9 +1085,8 @@ export function buildSculptedAnatomy(): SculptedAnatomyResult {
         nerveMat,
         8
       );
-      grp.add(sciatic);
+      target.add(sciatic);
 
-      // Common Fibular Branch at knee
       const fibular = makeTubeMesh(
         [
           [side * 8.4, 52.0, -4.2],
@@ -913,9 +1099,8 @@ export function buildSculptedAnatomy(): SculptedAnatomyResult {
         nerveMat,
         6
       );
-      grp.add(fibular);
+      target.add(fibular);
 
-      // Anterior Femoral Nerve
       const femoral = makeTubeMesh(
         [
           [side * 3.2, 104.0, -3.5],
@@ -928,7 +1113,7 @@ export function buildSculptedAnatomy(): SculptedAnatomyResult {
         nerveMat,
         6
       );
-      grp.add(femoral);
+      target.add(femoral);
     });
 
     tagPartGroup(grp, 'nerve_sciatic_femoral');
@@ -939,8 +1124,9 @@ export function buildSculptedAnatomy(): SculptedAnatomyResult {
      13. CAROTID & JUGULAR NEUROVASCULAR AXIS
      ============================================================================ */
   {
-    const grp = new THREE.Group();
+    const { grp, sideGroup } = createBilateralGroup();
     [-1, 1].forEach((side) => {
+      const target = sideGroup(side);
       const carotid = makeTubeMesh(
         [
           [side * 1.2, 146.5, 0.5],
@@ -953,7 +1139,7 @@ export function buildSculptedAnatomy(): SculptedAnatomyResult {
         arteryMat,
         8
       );
-      grp.add(carotid);
+      target.add(carotid);
 
       const jugular = makeTubeMesh(
         [
@@ -967,7 +1153,7 @@ export function buildSculptedAnatomy(): SculptedAnatomyResult {
         veinMat,
         8
       );
-      grp.add(jugular);
+      target.add(jugular);
     });
 
     tagPartGroup(grp, 'vascular_carotid_jugular');
@@ -1059,53 +1245,55 @@ export function buildSculptedAnatomy(): SculptedAnatomyResult {
      15. UPPER LIMB VASCULAR TREE
      ============================================================================ */
   {
-    const grp = new THREE.Group();
+    const { grp, sideGroup } = createBilateralGroup();
     [-1, 1].forEach((side) => {
+      const target = sideGroup(side);
       const armArt = makeTubeMesh(
         [
           [side * 1.4, 146.5, -0.6],
-          [side * 10.5, 144.0, -4.6],
-          [side * 19.2, 134.0, -4.8],
-          [side * 24.0, 118.5, -3.5],
-          [side * 26.8, 106.0, -2.5],
-          [side * 30.2, 86.5, 0.6],
+          [side * 10.6, 144.2, -4.8],
+          [side * 17.2, 139.5, -5.2],
+          [side * 19.6, 133.8, -4.8],
+          [side * 24.0, 120.2, -3.6],
+          [side * 27.0, 106.8, -2.8],
+          [side * 30.4, 86.2, 0.5],
         ],
         0.34,
-        28,
+        32,
         arteryMat,
         7
       );
-      grp.add(armArt);
+      target.add(armArt);
 
-      // Ulnar Artery Split in Forearm
       const ulnarArt = makeTubeMesh(
         [
-          [side * 24.0, 118.5, -3.5],
-          [side * 27.6, 105.5, -4.2],
-          [side * 30.8, 86.5, -0.2],
+          [side * 24.0, 120.2, -3.6],
+          [side * 27.8, 106.2, -4.2],
+          [side * 31.0, 86.2, -0.2],
         ],
         0.24,
         16,
         arteryMat,
         6
       );
-      grp.add(ulnarArt);
+      target.add(ulnarArt);
 
       const armVein = makeTubeMesh(
         [
           [side * 2.0, 147.2, 0.2],
-          [side * 11.2, 144.6, -3.8],
-          [side * 20.5, 134.0, -4.0],
-          [side * 25.0, 118.5, -2.6],
-          [side * 28.0, 106.0, -1.8],
-          [side * 31.2, 86.5, 0.8],
+          [side * 11.2, 144.8, -4.0],
+          [side * 18.0, 140.0, -4.4],
+          [side * 20.4, 134.0, -4.0],
+          [side * 24.8, 120.4, -2.8],
+          [side * 28.0, 106.8, -2.0],
+          [side * 31.2, 86.2, 0.8],
         ],
         0.38,
-        28,
+        32,
         veinMat,
         7
       );
-      grp.add(armVein);
+      target.add(armVein);
     });
 
     tagPartGroup(grp, 'vascular_upper_limb');
@@ -1116,11 +1304,12 @@ export function buildSculptedAnatomy(): SculptedAnatomyResult {
      16. LOWER LIMB VASCULAR TREE
      ============================================================================ */
   {
-    const grp = new THREE.Group();
+    const { grp, sideGroup } = createBilateralGroup();
     [-1, 1].forEach((side) => {
+      const target = sideGroup(side);
       const legArt = makeTubeMesh(
         [
-          [-0.3, 104.0, -2.0],
+          [side * 0.8, 104.0, -2.0],
           [side * 5.8, 96.5, -0.6],
           [side * 8.6, 85.0, 0.4],
           [side * 9.0, 72.0, -1.2],
@@ -1133,11 +1322,11 @@ export function buildSculptedAnatomy(): SculptedAnatomyResult {
         arteryMat,
         8
       );
-      grp.add(legArt);
+      target.add(legArt);
 
       const legVein = makeTubeMesh(
         [
-          [-1.4, 104.0, -1.4],
+          [side * 1.4, 104.0, -1.4],
           [side * 4.8, 96.5, 0.2],
           [side * 7.8, 85.0, 1.0],
           [side * 8.2, 72.0, -0.4],
@@ -1150,7 +1339,7 @@ export function buildSculptedAnatomy(): SculptedAnatomyResult {
         veinMat,
         8
       );
-      grp.add(legVein);
+      target.add(legVein);
     });
 
     tagPartGroup(grp, 'vascular_lower_limb');
@@ -1162,10 +1351,10 @@ export function buildSculptedAnatomy(): SculptedAnatomyResult {
      ============================================================================ */
   // 17A. Head & Neck Muscles
   {
-    const grp = new THREE.Group();
+    const { grp, sideGroup } = createBilateralGroup();
     [-1, 1].forEach((side) => {
-      // Sternocleidomastoid (SCM)
-      grp.add(
+      const target = sideGroup(side);
+      target.add(
         makeMuscleBelly(
           [
             [side * 5.0, 165.2, -3.6],
@@ -1178,8 +1367,7 @@ export function buildSculptedAnatomy(): SculptedAnatomyResult {
           muscleMat
         )
       );
-      // Masseter
-      grp.add(
+      target.add(
         makeMuscleBelly(
           [
             [side * 5.2, 168.0, 1.5],
@@ -1192,11 +1380,10 @@ export function buildSculptedAnatomy(): SculptedAnatomyResult {
           muscleMat
         )
       );
-      // Temporalis fan
       const temp = new THREE.Mesh(new THREE.SphereGeometry(2.6, 14, 12), muscleMat);
       temp.scale.set(0.35, 1.1, 1.25);
       temp.position.set(side * 6.3, 173.2, -0.5);
-      grp.add(temp);
+      target.add(temp);
     });
 
     tagPartGroup(grp, 'muscle_head_neck');
@@ -1205,10 +1392,10 @@ export function buildSculptedAnatomy(): SculptedAnatomyResult {
 
   // 17B. Thoracic & Core Muscles (Pectoralis Major + Rectus Abdominis + Obliques)
   {
-    const grp = new THREE.Group();
+    const { grp, sideGroup } = createBilateralGroup();
     [-1, 1].forEach((side) => {
-      // Pectoralis Major Clavicular & Sternal Heads
-      grp.add(
+      const target = sideGroup(side);
+      target.add(
         makeMuscleBelly(
           [
             [side * 1.4, 144.0, 4.4],
@@ -1221,7 +1408,7 @@ export function buildSculptedAnatomy(): SculptedAnatomyResult {
           muscleMat
         )
       );
-      grp.add(
+      target.add(
         makeMuscleBelly(
           [
             [side * 1.4, 136.5, 5.4],
@@ -1235,17 +1422,15 @@ export function buildSculptedAnatomy(): SculptedAnatomyResult {
         )
       );
 
-      // 4 Segmented Rectus Abdominis Packs per side
       for (let row = 0; row < 4; row++) {
         const y = 123.5 - row * 5.6;
         const pack = new THREE.Mesh(new THREE.SphereGeometry(2.3, 14, 12), muscleMat);
         pack.scale.set(1.05, 1.15, 0.45);
         pack.position.set(side * 2.6, y, 4.8 - row * 0.25);
-        grp.add(pack);
+        target.add(pack);
       }
 
-      // External Obliques flanking abdomen
-      grp.add(
+      target.add(
         makeMuscleBelly(
           [
             [side * 10.4, 128.0, 1.0],
@@ -1266,10 +1451,10 @@ export function buildSculptedAnatomy(): SculptedAnatomyResult {
 
   // 17C. Upper Limb Muscles (Deltoid, Biceps, Triceps, Forearm Flexors)
   {
-    const grp = new THREE.Group();
+    const { grp, sideGroup } = createBilateralGroup();
     [-1, 1].forEach((side) => {
-      // Deltoid cap
-      grp.add(
+      const target = sideGroup(side);
+      target.add(
         makeMuscleBelly(
           [
             [side * 14.2, 146.2, -5.8],
@@ -1282,8 +1467,7 @@ export function buildSculptedAnatomy(): SculptedAnatomyResult {
           muscleMat
         )
       );
-      // Biceps Brachii (anterior)
-      grp.add(
+      target.add(
         makeMuscleBelly(
           [
             [side * 18.2, 141.0, -4.6],
@@ -1296,8 +1480,7 @@ export function buildSculptedAnatomy(): SculptedAnatomyResult {
           muscleMat
         )
       );
-      // Triceps Brachii (posterior)
-      grp.add(
+      target.add(
         makeMuscleBelly(
           [
             [side * 18.8, 140.5, -7.8],
@@ -1310,8 +1493,7 @@ export function buildSculptedAnatomy(): SculptedAnatomyResult {
           muscleMat
         )
       );
-      // Forearm Flexor/Brachioradialis mass
-      grp.add(
+      target.add(
         makeMuscleBelly(
           [
             [side * 23.8, 120.0, -4.4],
@@ -1332,16 +1514,15 @@ export function buildSculptedAnatomy(): SculptedAnatomyResult {
 
   // 17D. Lower Limb Muscles (Gluteus, Quadriceps, Hamstrings, Calves & Achilles Tendon)
   {
-    const grp = new THREE.Group();
+    const { grp, sideGroup } = createBilateralGroup();
     [-1, 1].forEach((side) => {
-      // Gluteus Maximus
+      const target = sideGroup(side);
       const glute = new THREE.Mesh(new THREE.SphereGeometry(4.4, 16, 14), muscleMat);
       glute.scale.set(1.05, 1.32, 0.72);
       glute.position.set(side * 6.8, 92.0, -7.4);
-      grp.add(glute);
+      target.add(glute);
 
-      // Quadriceps (Rectus Femoris + Vastus Lateralis/Medialis)
-      grp.add(
+      target.add(
         makeMuscleBelly(
           [
             [side * 9.5, 92.0, 1.2],
@@ -1354,8 +1535,7 @@ export function buildSculptedAnatomy(): SculptedAnatomyResult {
           muscleMat
         )
       );
-      // Hamstrings (Posterior thigh)
-      grp.add(
+      target.add(
         makeMuscleBelly(
           [
             [side * 8.4, 89.0, -5.8],
@@ -1368,8 +1548,7 @@ export function buildSculptedAnatomy(): SculptedAnatomyResult {
           muscleMat
         )
       );
-      // Gastrocnemius Calf
-      grp.add(
+      target.add(
         makeMuscleBelly(
           [
             [side * 7.8, 50.0, -5.8],
@@ -1382,8 +1561,7 @@ export function buildSculptedAnatomy(): SculptedAnatomyResult {
           muscleMat
         )
       );
-      // Achilles Tendon
-      grp.add(
+      target.add(
         makeTubeMesh(
           [
             [side * 7.2, 22.0, -6.8],
@@ -1424,6 +1602,7 @@ export function buildSculptedAnatomy(): SculptedAnatomyResult {
     },
     dispose: () => {
       geometries.forEach((g) => g.dispose());
+      textures.forEach((t) => t.dispose());
       [
         nerveMat,
         arteryMat,

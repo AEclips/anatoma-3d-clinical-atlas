@@ -2,7 +2,10 @@ import React, { useState } from 'react';
 import {
   Check,
   Eye,
+  EyeOff,
   Layers,
+  Maximize,
+  Minimize,
   Orbit,
   Pause,
   Play,
@@ -34,6 +37,8 @@ interface TopHudProps {
   freeOrbit: boolean;
   showPins: boolean;
   isPlaying: boolean;
+  cinemaMode: boolean;
+  isFullscreen: boolean;
   heartRateBpm: number;
   onSelectChapter: (idx: number) => void;
   onChangeDissectionMode: (mode: DissectionMode) => void;
@@ -45,6 +50,8 @@ interface TopHudProps {
   onToggleOrbit: () => void;
   onTogglePins: () => void;
   onTogglePlay: () => void;
+  onToggleCinema: () => void;
+  onToggleFullscreen: () => void;
   onOpenSearch: () => void;
 }
 
@@ -57,6 +64,8 @@ export const TopHud: React.FC<TopHudProps> = ({
   freeOrbit,
   showPins,
   isPlaying,
+  cinemaMode,
+  isFullscreen,
   heartRateBpm,
   onSelectChapter,
   onChangeDissectionMode,
@@ -68,6 +77,8 @@ export const TopHud: React.FC<TopHudProps> = ({
   onToggleOrbit,
   onTogglePins,
   onTogglePlay,
+  onToggleCinema,
+  onToggleFullscreen,
   onOpenSearch,
 }) => {
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -203,7 +214,27 @@ export const TopHud: React.FC<TopHudProps> = ({
             title={isPlaying ? 'Pause Heartbeat & Respiration' : 'Resume Heartbeat & Respiration'}
           >
             {isPlaying ? <Pause size={13} /> : <Play size={13} />}
-            <span>{isPlaying ? 'Pause' : 'Play'}</span>
+          </button>
+
+          <button
+            type="button"
+            className={`tool-btn ${cinemaMode ? 'active' : ''}`}
+            onClick={onToggleCinema}
+            title="Toggle Pure 3D Cinema Mode (H)"
+            aria-label="Toggle Pure 3D Cinema Mode"
+          >
+            {cinemaMode ? <Eye size={13} /> : <EyeOff size={13} />}
+            <span>3D</span>
+          </button>
+
+          <button
+            type="button"
+            className={`tool-btn ${isFullscreen ? 'active' : ''}`}
+            onClick={onToggleFullscreen}
+            title="Toggle Fullscreen Workstation (F)"
+            aria-label="Toggle Fullscreen Workstation"
+          >
+            {isFullscreen ? <Minimize size={13} /> : <Maximize size={13} />}
           </button>
 
           <button
@@ -211,9 +242,9 @@ export const TopHud: React.FC<TopHudProps> = ({
             className="tool-btn"
             onClick={onOpenSearch}
             title="Search Anatomical Atlas (Ctrl+K)"
+            aria-label="Search Anatomical Atlas"
           >
             <Search size={13} />
-            <span>Search</span>
           </button>
         </div>
       </div>
