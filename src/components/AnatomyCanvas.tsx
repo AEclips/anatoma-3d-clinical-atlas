@@ -1,0 +1,995 @@
+import React, { useEffect, useRef, useState } from 'react';
+import * as THREE from 'three';
+import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import {
+  ANATOMY_PARTS,
+  CHAPTERS,
+  PARTS_BY_ID,
+  SYSTEM_MAP,
+} from '../data/anatomyDatabase';
+import { buildSculptedAnatomy, SculptedAnatomyResult } from '../three/AnatomySculptor';
+import {
+  DissectionMode,
+  ImagingMode,
+  SystemId,
+} from '../types/anatomy';
+
+interface LayerState {
+  active: boolean;
+  opacity: number;
+}
+
+interface AnatomyCanvasProps {
+  scrollProgress: number;
+  activeChapter: number;
+  dissectionMode: DissectionMode;
+  imagingMode: ImagingMode;
+  layerStates: Record<SystemId, LayerState>;
+  selectedPartId: string | null;
+  isolatedPartId: string | null;
+  isolationGhostContext: boolean;
+  freeOrbit: boolean;
+  autoSpin: boolean;
+  showPins: boolean;
+  isPlaying: boolean;
+  heartRateBpm: number;
+  onSelectPart: (partId: string | null) => void;
+  onIsolatePart: (partId: string) => void;
+  onModelReady: (loadedCount: number) => void;
+  onModelError: (errMsg: string) => void;
+}
+
+interface PinScreenPos {
+  id: string;
+  x: number;
+  y: number;
+  visible: boolean;
+}
+
+export const AnatomyCanvas: React.FC<AnatomyCanvasProps> = ({
+  scrollProgress,
+  activeChapter,
+  dissectionMode,
+  imagingMode,
+  layerStates,
+  selectedPartId,
+  isolatedPartId,
+  isolationGhostContext,
+  freeOrbit,
+  autoSpin,
+  showPins,
+  isPlaying,
+  heartRateBpm,
+  onSelectPart,
+  onIsolatePart,
+  onModelReady,
+  onModelError,
+}) => {
+  const mountRef = useRef<HTMLDivElement | null>(null);
+  const pinsRef = useRef<HTMLDivElement | null>(null);
+  const [hoveredId, setHoveredId] = useState<string | null>(null);
+  const [hoverScreenPos, setHoverScreenPos] = useState<{ x: number; y: number }>({
+    x: 0,
+    y: 0,
+  });
+
+  // Mutable ref holding latest React props so RAF loop stays stale-closure-free
+  const propsRef = useRef({
+    scrollProgress,
+    activeChapter,
+    dissectionMode,
+    imagingMode,
+    layerStates,
+    selectedPartId,
+    isolatedPartId,
+    isolationGhostContext,
+    freeOrbit,
+    autoSpin,
+    showPins,
+    isPlaying,
+    heartRateBpm,
+    hoveredId,
+    onSelectPart,
+    onIsolatePart,
+  });
+
+  propsRef.current = {
+    scrollProgress,
+    activeChapter,
+    dissectionMode,
+    imagingMode,
+    layerStates,
+    selectedPartId,
+    isolatedPartId,
+    isolationGhostContext,
+    freeOrbit,
+    autoSpin,
+    showPins,
+    isPlaying,
+    heartRateBpm,
+    hoveredId,
+    onSelectPart,
+    onIsolatePart,
+  };
+
+  // Track isolation transitions to smoothly snap camera once upon entering/exiting isolation
+  const prevIsolatedRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    const container = mountRef.current;
+    if (!container) return;
+
+    /* -------------------- 1. RENDERER, SCENE, CAMERA -------------------- */
+    const scene = new THREE.Scene();
+    scene.fog = new THREE.FogExp2(0x040814, 0.032);
+
+    const camera = new THREE.PerspectiveCamera(
+      42,
+      window.innerWidth / window.innerHeight,
+      0.08,
+      60
+    );
+    camera.position.set(0, -0.04, 5.55);
+
+    const renderer = new THREE.WebGLRenderer({
+      antialias: true,
+      alpha: true,
+      powerPreference: 'high-performance',
+    });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.18;
+    container.appendChild(renderer.domElement);
+
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.07;
+    controls.enablePan = true;
+    controls.minDistance = 0.35;
+    controls.maxDistance = 8.5;
+    controls.maxPolarAngle = Math.PI * 0.92;
+    controls.minPolarAngle = Math.PI * 0.08;
+    controls.enabled = false;
+
+    /* -------------------- 2. STUDIO SURGICAL LIGHTING -------------------- */
+    const hemiLight = new THREE.HemisphereLight(0xf0f9ff, 0x0b1120, 0.95);
+    scene.add(hemiLight);
+
+    const keyLight = new THREE.DirectionalLight(0xfff7ed, 1.55);
+    keyLight.position.set(4.5, 6.0, 5.0);
+    keyLight.castShadow = true;
+    keyLight.shadow.mapSize.set(1024, 1024);
+    scene.add(keyLight);
+
+    const rimCyan = new THREE.DirectionalLight(0x38bdf8, 1.15);
+    rimCyan.position.set(-4.5, 3.0, -3.5);
+    scene.add(rimCyan);
+
+    const rimWarm = new THREE.DirectionalLight(0xf43f5e, 0.45);
+    rimWarm.position.set(3.5, -1.5, -3.0);
+    scene.add(rimWarm);
+
+    const underFill = new THREE.DirectionalLight(0x94a3b8, 0.45);
+    underFill.position.set(0, -4, 3);
+    scene.add(underFill);
+
+    // Subtle Clinical Measurement Platform Grid under feet
+    const platformGroup = new THREE.Group();
+    platformGroup.position.set(0, -1.85, 0);
+    const gridHelper = new THREE.GridHelper(4.8, 24, 0x1e3a5f, 0x0f172a);
+    gridHelper.material.transparent = true;
+    gridHelper.material.opacity = 0.45;
+    platformGroup.add(gridHelper);
+
+    const ringGeom = new THREE.RingGeometry(0.95, 0.98, 64);
+    const ringMat = new THREE.MeshBasicMaterial({
+      color: 0x38bdf8,
+      transparent: true,
+      opacity: 0.25,
+      side: THREE.DoubleSide,
+    });
+    const ringMesh = new THREE.Mesh(ringGeom, ringMat);
+    ringMesh.rotation.x = -Math.PI / 2;
+    ringMesh.position.y = 0.005;
+    platformGroup.add(ringMesh);
+    scene.add(platformGroup);
+
+    /* -------------------- 3. ANATOMICAL ROOT & MATERIALS -------------------- */
+    const anatomicalRoot = new THREE.Group();
+    anatomicalRoot.scale.set(0.02, 0.02, 0.02);
+    const initialHeroX =
+      window.innerWidth >= 1024 ? 0.62 : window.innerWidth >= 768 ? 0.35 : 0;
+    anatomicalRoot.position.set(initialHeroX, -1.86, 0);
+    scene.add(anatomicalRoot);
+
+    const boneBaseMat = new THREE.MeshPhysicalMaterial({
+      color: 0xf1ebe0,
+      roughness: 0.44,
+      metalness: 0.04,
+      clearcoat: 0.14,
+      clearcoatRoughness: 0.55,
+      transparent: true,
+      opacity: 1.0,
+    });
+
+    const skinShellMat = new THREE.MeshPhysicalMaterial({
+      color: 0x38bdf8,
+      emissive: 0x0369a1,
+      emissiveIntensity: 0.22,
+      roughness: 0.22,
+      metalness: 0.08,
+      transparent: true,
+      opacity: 0.16,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    });
+
+    // Build sculpted organic organs, muscles, nerves, and vessels
+    const sculpted: SculptedAnatomyResult = buildSculptedAnatomy();
+    const allPartGroups: Record<string, THREE.Group> = {
+      ...sculpted.partGroups,
+    };
+    const boneMaterialsById: Record<string, THREE.MeshPhysicalMaterial> = {};
+    const originalSculptColors = new Map<
+      THREE.Material,
+      { color: number; emissive: number; emissiveIntensity: number; opacity: number }
+    >();
+
+    Object.values(sculpted.materials).forEach((m) => {
+      const mat = m as THREE.MeshStandardMaterial | THREE.MeshPhysicalMaterial;
+      originalSculptColors.set(mat, {
+        color: mat.color.getHex(),
+        emissive: mat.emissive ? mat.emissive.getHex() : 0x000000,
+        emissiveIntensity: mat.emissiveIntensity ?? 0,
+        opacity: mat.opacity,
+      });
+    });
+
+    Object.values(sculpted.partGroups).forEach((grp) => {
+      anatomicalRoot.add(grp);
+    });
+
+    // Clone materials per sculpted group so individual part highlighting / isolation dimming works cleanly
+    const partOriginalMaterials = new Map<
+      string,
+      Array<{
+        mesh: THREE.Mesh;
+        baseMat: THREE.MeshStandardMaterial | THREE.MeshPhysicalMaterial;
+      }>
+    >();
+
+    Object.entries(sculpted.partGroups).forEach(([partId, grp]) => {
+      const entries: Array<{
+        mesh: THREE.Mesh;
+        baseMat: THREE.MeshStandardMaterial | THREE.MeshPhysicalMaterial;
+      }> = [];
+      grp.traverse((child) => {
+        if ((child as THREE.Mesh).isMesh) {
+          const mesh = child as THREE.Mesh;
+          const cloned = (mesh.material as THREE.MeshPhysicalMaterial).clone();
+          mesh.material = cloned;
+          entries.push({ mesh, baseMat: cloned });
+          originalSculptColors.set(cloned, {
+            color: cloned.color.getHex(),
+            emissive: cloned.emissive ? cloned.emissive.getHex() : 0x000000,
+            emissiveIntensity: cloned.emissiveIntensity ?? 0,
+            opacity: cloned.opacity,
+          });
+        }
+      });
+      partOriginalMaterials.set(partId, entries);
+    });
+
+    /* -------------------- 4. LOAD REAL GLB SKELETON & DERMAL ENVELOPE -------------------- */
+    let isDisposed = false;
+    const loader = new GLTFLoader();
+    loader.load(
+      '/models/human-skeleton.glb',
+      (gltf) => {
+        if (isDisposed) return;
+        const rawScene = gltf.scene;
+        let loadedCount = 0;
+
+        ANATOMY_PARTS.filter((p) => p.glbMeshName).forEach((part) => {
+          const found = rawScene.getObjectByName(part.glbMeshName!);
+          if (!found) return;
+
+          const partGroup = new THREE.Group();
+          partGroup.name = part.id;
+          partGroup.userData.partId = part.id;
+
+          const cloned = found.clone(true);
+          const isSkin = part.id === 'skin_envelope';
+          const mat = isSkin ? skinShellMat : boneBaseMat.clone();
+
+          if (!isSkin) {
+            boneMaterialsById[part.id] = mat as THREE.MeshPhysicalMaterial;
+          }
+
+          cloned.traverse((child) => {
+            child.userData.partId = part.id;
+            if ((child as THREE.Mesh).isMesh) {
+              const mesh = child as THREE.Mesh;
+              mesh.material = mat;
+              mesh.castShadow = !isSkin;
+              mesh.receiveShadow = !isSkin;
+            }
+          });
+
+          partGroup.add(cloned);
+
+          // Attach tiny 6-vertex sacral fragment SM_HumanSkeleton_11 directly onto Pelvic Girdle
+          if (part.id === 'SM_HumanSkeleton_16') {
+            const frag = rawScene.getObjectByName('SM_HumanSkeleton_11');
+            if (frag) {
+              const fragClone = frag.clone(true);
+              fragClone.traverse((c) => {
+                c.userData.partId = part.id;
+                if ((c as THREE.Mesh).isMesh) {
+                  (c as THREE.Mesh).material = mat;
+                }
+              });
+              partGroup.add(fragClone);
+            }
+          }
+
+          anatomicalRoot.add(partGroup);
+          allPartGroups[part.id] = partGroup;
+          loadedCount++;
+        });
+
+        onModelReady(loadedCount);
+      },
+      undefined,
+      (err) => {
+        if (!isDisposed) {
+          onModelError(err instanceof Error ? err.message : 'Failed to load 3D skeleton GLB');
+        }
+      }
+    );
+
+    /* -------------------- 5. DIRECT 3D RAYCASTING (HOVER, CLICK, DOUBLE-CLICK) -------------------- */
+    const raycaster = new THREE.Raycaster();
+    const pointerNdc = new THREE.Vector2();
+    let pointerDownXY = { x: 0, y: 0 };
+
+    const pickPartAtEvent = (e: PointerEvent | MouseEvent): string | null => {
+      const rect = renderer.domElement.getBoundingClientRect();
+      pointerNdc.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+      pointerNdc.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+      raycaster.setFromCamera(pointerNdc, camera);
+
+      const { layerStates: layers, isolatedPartId: isoId } = propsRef.current;
+
+      // Gather pickable meshes: prioritize internal structures over translucent skin envelope
+      const primaryTargets: THREE.Object3D[] = [];
+      const fallbackSkin: THREE.Object3D[] = [];
+
+      Object.entries(allPartGroups).forEach(([id, grp]) => {
+        if (!grp.visible) return;
+        const part = PARTS_BY_ID[id];
+        if (!part) return;
+        if (isoId && id !== isoId) return; // In isolation mode, pick only the isolated structure
+        if (id === 'skin_envelope') {
+          fallbackSkin.push(grp);
+        } else if (layers[part.system]?.active) {
+          primaryTargets.push(grp);
+        }
+      });
+
+      const hits = raycaster.intersectObjects(primaryTargets, true);
+      for (const hit of hits) {
+        const pid = hit.object.userData?.partId as string | undefined;
+        if (pid && PARTS_BY_ID[pid]) return pid;
+      }
+
+      if (fallbackSkin.length > 0 && primaryTargets.length === 0) {
+        const skinHits = raycaster.intersectObjects(fallbackSkin, true);
+        for (const hit of skinHits) {
+          const pid = hit.object.userData?.partId as string | undefined;
+          if (pid && PARTS_BY_ID[pid]) return pid;
+        }
+      }
+
+      return null;
+    };
+
+    const handlePointerDown = (e: PointerEvent) => {
+      pointerDownXY = { x: e.clientX, y: e.clientY };
+    };
+
+    const handlePointerMove = (e: PointerEvent) => {
+      const hitId = pickPartAtEvent(e);
+      setHoveredId((prev) => (prev === hitId ? prev : hitId));
+      if (hitId) {
+        setHoverScreenPos({ x: e.clientX, y: e.clientY });
+      }
+    };
+
+    const handlePointerUp = (e: PointerEvent) => {
+      const dist = Math.hypot(
+        e.clientX - pointerDownXY.x,
+        e.clientY - pointerDownXY.y
+      );
+      if (dist > 6) return; // Dragged to orbit
+      const hitId = pickPartAtEvent(e);
+      if (hitId) {
+        propsRef.current.onSelectPart(hitId);
+      }
+    };
+
+    const handleDoubleClick = (e: MouseEvent) => {
+      const hitId = pickPartAtEvent(e);
+      if (hitId) {
+        propsRef.current.onIsolatePart(hitId);
+      }
+    };
+
+    const domEl = renderer.domElement;
+    domEl.addEventListener('pointerdown', handlePointerDown);
+    domEl.addEventListener('pointermove', handlePointerMove);
+    domEl.addEventListener('pointerup', handlePointerUp);
+    domEl.addEventListener('dblclick', handleDoubleClick);
+
+    /* -------------------- 6. ANIMATION LOOP & DISSECTION PHYSICS -------------------- */
+    const clock = new THREE.Clock();
+    let physioTime = 0;
+    let rafId = 0;
+
+    const targetPos = new THREE.Vector3();
+    const targetRot = new THREE.Euler();
+    const desiredCamPos = new THREE.Vector3();
+    const desiredLook = new THREE.Vector3();
+    const box3 = new THREE.Box3();
+    const boxCenter = new THREE.Vector3();
+    const projV3 = new THREE.Vector3();
+
+    const animate = () => {
+      rafId = requestAnimationFrame(animate);
+      const delta = Math.min(0.05, clock.getDelta());
+      const state = propsRef.current;
+
+      if (state.isPlaying) {
+        physioTime += delta;
+      }
+
+      const activeChapterData = CHAPTERS[state.activeChapter] ?? CHAPTERS[0];
+      const chapterHighlights = activeChapterData.highlights;
+
+      /* --- A. Update Dissection Offsets & Layer Visibility/Opacity --- */
+      const peelEase = 1 - Math.pow(1 - state.scrollProgress, 2.5);
+
+      ANATOMY_PARTS.forEach((part) => {
+        const grp = allPartGroups[part.id];
+        if (!grp) return;
+
+        const layerCfg = state.layerStates[part.system];
+        const isLayerActive = layerCfg?.active ?? true;
+        const sysCfg = SYSTEM_MAP[part.system];
+
+        // Determine visibility during normal vs 360° Isolation Mode
+        if (state.isolatedPartId) {
+          const isTarget = part.id === state.isolatedPartId;
+          grp.visible = isTarget || (state.isolationGhostContext && isLayerActive && part.id !== 'skin_envelope');
+        } else {
+          grp.visible = isLayerActive;
+        }
+
+        if (!grp.visible) return;
+
+        // Compute Regional vs Layer-by-Layer Peel displacement
+        const [stStart, stEnd] = part.stagger;
+        const rawT = Math.max(
+          0,
+          Math.min(1, (state.scrollProgress - stStart) / Math.max(0.01, stEnd - stStart))
+        );
+        const easeOutT = 1 - Math.pow(1 - rawT, 3);
+
+        if (state.dissectionMode === 'peel' && sysCfg) {
+          targetPos.set(
+            sysCfg.peelOffset[0] * peelEase + part.explodeOffset[0] * 0.28 * easeOutT,
+            sysCfg.peelOffset[1] * peelEase + part.explodeOffset[1] * 0.28 * easeOutT,
+            sysCfg.peelOffset[2] * peelEase + part.explodeOffset[2] * 0.28 * easeOutT
+          );
+          targetRot.set(
+            part.explodeRot[0] * 0.35 * easeOutT,
+            part.explodeRot[1] * 0.35 * easeOutT,
+            part.explodeRot[2] * 0.35 * easeOutT
+          );
+        } else {
+          targetPos.set(
+            part.explodeOffset[0] * easeOutT,
+            part.explodeOffset[1] * easeOutT,
+            part.explodeOffset[2] * easeOutT
+          );
+          targetRot.set(
+            part.explodeRot[0] * easeOutT,
+            part.explodeRot[1] * easeOutT,
+            part.explodeRot[2] * easeOutT
+          );
+        }
+
+        grp.position.lerp(targetPos, Math.min(1, delta * 9));
+        grp.rotation.x = THREE.MathUtils.lerp(grp.rotation.x, targetRot.x, Math.min(1, delta * 9));
+        grp.rotation.y = THREE.MathUtils.lerp(grp.rotation.y, targetRot.y, Math.min(1, delta * 9));
+        grp.rotation.z = THREE.MathUtils.lerp(grp.rotation.z, targetRot.z, Math.min(1, delta * 9));
+
+        /* --- B. Material Styling (Imaging Modes + Selection + Hover + Isolation Ghosting) --- */
+        const isSelected = part.id === state.selectedPartId;
+        const isHovered = part.id === state.hoveredId;
+        const isHighlighted =
+          isSelected ||
+          isHovered ||
+          (state.activeChapter > 0 &&
+            state.activeChapter < 6 &&
+            chapterHighlights.includes(part.id));
+        const hasChapterFocus =
+          chapterHighlights.length > 0 && state.activeChapter > 0 && state.activeChapter < 6;
+        const isGhostedByIsolation =
+          Boolean(state.isolatedPartId) && part.id !== state.isolatedPartId;
+
+        const baseSysOpacity = layerCfg?.opacity ?? 1.0;
+
+        if (part.id === 'skin_envelope') {
+          skinShellMat.opacity = isGhostedByIsolation ? 0.04 : baseSysOpacity;
+        } else if (part.glbMeshName && boneMaterialsById[part.id]) {
+          const bMat = boneMaterialsById[part.id];
+          if (isGhostedByIsolation) {
+            bMat.color.setHex(0x64748b);
+            bMat.emissive.setHex(0x000000);
+            bMat.emissiveIntensity = 0;
+            bMat.opacity = 0.05;
+            bMat.depthWrite = false;
+          } else if (state.imagingMode === 'xray') {
+            bMat.color.setHex(isSelected || isHovered ? 0xe0f2fe : 0x38bdf8);
+            bMat.emissive.setHex(isSelected || isHovered ? 0x0ea5e9 : 0x0369a1);
+            bMat.emissiveIntensity = isSelected || isHovered ? 1.15 : isHighlighted ? 0.72 : 0.38;
+            bMat.opacity = Math.min(baseSysOpacity, isSelected ? 0.94 : 0.58);
+            bMat.depthWrite = false;
+          } else if (state.imagingMode === 'neurovascular') {
+            bMat.color.setHex(0x94a3b8);
+            bMat.emissive.setHex(0x000000);
+            bMat.emissiveIntensity = 0;
+            bMat.opacity = Math.min(baseSysOpacity, isSelected ? 0.85 : 0.16);
+            bMat.depthWrite = isSelected;
+          } else {
+            // Realistic PBR Bone
+            const isIsoTarget = state.isolatedPartId === part.id;
+            if (isIsoTarget) {
+              bMat.color.setHex(0xf3ede2);
+              bMat.emissive.setHex(0x000000);
+              bMat.emissiveIntensity = 0;
+            } else if (isSelected || isHovered) {
+              bMat.color.setHex(0xffffff);
+              bMat.emissive.setHex(0x0ea5e9);
+              bMat.emissiveIntensity = isSelected ? 0.32 : 0.22;
+            } else if (isHighlighted) {
+              bMat.color.setHex(0xfef9f0);
+              bMat.emissive.setHex(0x0284c7);
+              bMat.emissiveIntensity = 0.14;
+            } else if (hasChapterFocus && !state.selectedPartId) {
+              bMat.color.setHex(0x7c7870);
+              bMat.emissive.setHex(0x000000);
+              bMat.emissiveIntensity = 0;
+            } else {
+              bMat.color.setHex(0xf1ebe0);
+              bMat.emissive.setHex(0x000000);
+              bMat.emissiveIntensity = 0;
+            }
+            bMat.opacity = baseSysOpacity;
+            bMat.depthWrite = baseSysOpacity >= 0.95;
+          }
+        } else {
+          // Sculpted Non-Skeletal System Materials
+          const matEntries = partOriginalMaterials.get(part.id);
+          if (matEntries) {
+            const bioPulse = 0.55 + Math.sin(physioTime * 3.2) * 0.25;
+            const isIsoTarget = state.isolatedPartId === part.id;
+            matEntries.forEach(({ baseMat }) => {
+              const orig = originalSculptColors.get(baseMat);
+              if (!orig) return;
+
+              if (isGhostedByIsolation) {
+                baseMat.color.setHex(orig.color);
+                if (baseMat.emissive) {
+                  baseMat.emissive.setHex(0x000000);
+                  baseMat.emissiveIntensity = 0;
+                }
+                baseMat.opacity = 0.04;
+                baseMat.depthWrite = false;
+              } else if (state.imagingMode === 'xray') {
+                const isNV = part.system === 'nervous' || part.system === 'vascular';
+                baseMat.color.setHex(
+                  part.system === 'nervous'
+                    ? 0xfef08a
+                    : part.system === 'vascular'
+                      ? 0x38bdf8
+                      : orig.color
+                );
+                if (baseMat.emissive) {
+                  baseMat.emissive.setHex(
+                    part.system === 'nervous'
+                      ? 0xeab308
+                      : part.system === 'vascular'
+                        ? 0x0284c7
+                        : orig.emissive
+                  );
+                  baseMat.emissiveIntensity = isSelected || isHovered ? 0.85 : isNV ? 0.65 : 0.25;
+                }
+                baseMat.opacity = isNV
+                  ? baseSysOpacity
+                  : Math.min(baseSysOpacity, part.system === 'muscular' ? 0.22 : 0.55);
+                baseMat.depthWrite = baseMat.opacity >= 0.92;
+              } else if (state.imagingMode === 'neurovascular') {
+                const isNV = part.system === 'nervous' || part.system === 'vascular';
+                baseMat.color.setHex(orig.color);
+                if (baseMat.emissive) {
+                  baseMat.emissive.setHex(orig.emissive);
+                  baseMat.emissiveIntensity = isNV ? 0.95 * bioPulse : isSelected ? 0.35 : 0.08;
+                }
+                baseMat.opacity = isNV
+                  ? baseSysOpacity
+                  : Math.min(baseSysOpacity, isSelected ? 0.9 : 0.14);
+                baseMat.depthWrite = isNV || isSelected;
+              } else {
+                baseMat.color.setHex(orig.color);
+                if (baseMat.emissive) {
+                  if (isIsoTarget) {
+                    // Authentic PBR look during 360° isolation
+                    baseMat.emissive.setHex(orig.emissive);
+                    baseMat.emissiveIntensity = orig.emissiveIntensity;
+                  } else if (isSelected || isHovered) {
+                    baseMat.emissive.setHex(orig.color);
+                    baseMat.emissiveIntensity = isSelected ? 0.28 : 0.18;
+                  } else {
+                    baseMat.emissive.setHex(orig.emissive);
+                    baseMat.emissiveIntensity =
+                      part.system === 'nervous'
+                        ? orig.emissiveIntensity * (0.75 + Math.sin(physioTime * 3.5) * 0.35)
+                        : orig.emissiveIntensity;
+                  }
+                }
+                baseMat.opacity = orig.opacity * baseSysOpacity;
+                baseMat.depthWrite = baseMat.opacity >= 0.94;
+              }
+            });
+          }
+        }
+      });
+
+      /* --- C. Real-Time Physiological Animations (Cardiac Beat & Lung Respiration) --- */
+      if (sculpted.animatedRefs.heartGroup) {
+        const bps = state.heartRateBpm / 60;
+        const phase = (physioTime * bps) % 1;
+        // Physiological systolic lub-dub pulse curve
+        const lub = Math.exp(-Math.pow((phase - 0.14) / 0.055, 2));
+        const dub = 0.55 * Math.exp(-Math.pow((phase - 0.32) / 0.06, 2));
+        const pulseScale = 1 + 0.058 * (lub + dub);
+        sculpted.animatedRefs.heartGroup.scale.set(
+          pulseScale,
+          pulseScale * 0.985,
+          pulseScale
+        );
+      }
+
+      const breathWave = Math.sin(physioTime * ((16 / 60) * Math.PI * 2));
+      const lungScaleX = 1 + breathWave * 0.035;
+      const lungScaleZ = 1 + breathWave * 0.045;
+      if (sculpted.animatedRefs.leftLung) {
+        sculpted.animatedRefs.leftLung.scale.set(lungScaleX, 1 + breathWave * 0.02, lungScaleZ);
+      }
+      if (sculpted.animatedRefs.rightLung) {
+        sculpted.animatedRefs.rightLung.scale.set(lungScaleX, 1 + breathWave * 0.02, lungScaleZ);
+      }
+      if (sculpted.animatedRefs.diaphragm) {
+        sculpted.animatedRefs.diaphragm.position.y = 123.5 - breathWave * 0.75;
+      }
+
+      /* --- D. Camera Choreography & 360° Part Isolation Focus --- */
+      const isDesktop = window.innerWidth >= 1024;
+      const rightSpaceShift = isDesktop ? 0.62 : window.innerWidth >= 768 ? 0.35 : 0;
+      const rootTargetX =
+        state.isolatedPartId || state.selectedPartId
+          ? 0
+          : rightSpaceShift;
+
+      if (state.isolatedPartId) {
+        anatomicalRoot.position.x = 0;
+      } else {
+        anatomicalRoot.position.x = THREE.MathUtils.lerp(
+          anatomicalRoot.position.x,
+          rootTargetX,
+          Math.min(1, delta * 7)
+        );
+      }
+
+      if (state.autoSpin && !state.isolatedPartId) {
+        anatomicalRoot.rotation.y += delta * 0.38;
+      } else if (!state.isolatedPartId) {
+        const idleBreathYaw =
+          state.scrollProgress < 0.08 && state.isPlaying
+            ? Math.sin(physioTime * 0.9) * 0.06
+            : 0;
+        anatomicalRoot.rotation.y = THREE.MathUtils.lerp(
+          anatomicalRoot.rotation.y,
+          idleBreathYaw,
+          Math.min(1, delta * 5)
+        );
+      }
+
+      // Check Isolation entry/exit transition
+      const isolatedGroup = state.isolatedPartId
+        ? allPartGroups[state.isolatedPartId]
+        : null;
+
+      if (state.isolatedPartId && isolatedGroup) {
+        controls.enabled = true;
+        anatomicalRoot.updateMatrixWorld(true);
+        box3.setFromObject(isolatedGroup);
+        box3.getCenter(boxCenter);
+
+        if (prevIsolatedRef.current !== state.isolatedPartId) {
+          const isoPart = PARTS_BY_ID[state.isolatedPartId];
+          const dist = isoPart?.isolateDistance ?? 0.85;
+          controls.target.copy(boxCenter);
+          camera.position.set(
+            boxCenter.x + dist * 0.25,
+            boxCenter.y + dist * 0.14,
+            boxCenter.z + dist
+          );
+          prevIsolatedRef.current = state.isolatedPartId;
+        } else {
+          controls.target.lerp(boxCenter, Math.min(1, delta * 6));
+        }
+
+        if (state.autoSpin) {
+          controls.autoRotate = true;
+          controls.autoRotateSpeed = 2.0;
+        } else {
+          controls.autoRotate = false;
+        }
+        controls.update();
+      } else {
+        if (prevIsolatedRef.current !== null) {
+          prevIsolatedRef.current = null;
+          controls.autoRotate = false;
+        }
+
+        if (state.freeOrbit) {
+          controls.enabled = true;
+          controls.autoRotate = state.autoSpin;
+          controls.autoRotateSpeed = 1.6;
+          controls.update();
+        } else {
+          controls.enabled = false;
+          const camArr = activeChapterData.cam;
+          const lookArr = activeChapterData.look;
+          const zoomAdjust =
+            state.dissectionMode === 'peel' ? 1.55 : 1.0;
+
+          desiredCamPos.set(
+            camArr[0],
+            camArr[1],
+            camArr[2] * zoomAdjust
+          );
+          desiredLook.set(lookArr[0], lookArr[1], lookArr[2]);
+
+          camera.position.lerp(desiredCamPos, Math.min(1, delta * 3.8));
+          controls.target.lerp(desiredLook, Math.min(1, delta * 4.5));
+          camera.lookAt(controls.target);
+        }
+      }
+
+      /* --- E. Project 3D Floating Pins directly to DOM without React Re-Renders --- */
+      const pinsRoot = pinsRef.current;
+      if (pinsRoot) {
+        if (!state.showPins || (state.scrollProgress < 0.05 && !state.isolatedPartId)) {
+          pinsRoot.style.opacity = '0';
+          pinsRoot.style.pointerEvents = 'none';
+        } else {
+          pinsRoot.style.opacity = '1';
+          const w = window.innerWidth;
+          const h = window.innerHeight;
+          const isLab = state.activeChapter === 6;
+
+          const pinNodes = pinsRoot.children;
+          for (let i = 0; i < pinNodes.length; i++) {
+            const el = pinNodes[i] as HTMLElement;
+            const pid = el.dataset.partId;
+            if (!pid) continue;
+            const part = PARTS_BY_ID[pid];
+            const grp = allPartGroups[pid];
+            if (!part || !grp || !grp.visible) {
+              el.style.display = 'none';
+              continue;
+            }
+
+            const isHigh =
+              pid === state.selectedPartId ||
+              pid === state.isolatedPartId ||
+              chapterHighlights.includes(pid);
+
+            const shouldShow = state.isolatedPartId
+              ? pid === state.isolatedPartId
+              : isLab
+                ? state.layerStates[part.system]?.active
+                : isHigh && state.layerStates[part.system]?.active;
+
+            if (!shouldShow) {
+              el.style.display = 'none';
+              continue;
+            }
+
+            projV3.set(
+              part.center[0] + grp.position.x,
+              part.center[1] + 2.5 + grp.position.y,
+              part.center[2] + grp.position.z
+            );
+            projV3.applyMatrix4(anatomicalRoot.matrixWorld);
+            projV3.project(camera);
+
+            if (projV3.z > 1 || projV3.z < -1) {
+              el.style.display = 'none';
+              continue;
+            }
+
+            const sx = (projV3.x * 0.5 + 0.5) * w;
+            const sy = (-projV3.y * 0.5 + 0.5) * h;
+
+            if (sx < 24 || sx > w - 24 || sy < 68 || sy > h - 24) {
+              el.style.display = 'none';
+              continue;
+            }
+
+            el.style.display = 'inline-flex';
+            el.style.left = `${sx.toFixed(1)}px`;
+            el.style.top = `${sy.toFixed(1)}px`;
+          }
+        }
+      }
+
+      renderer.render(scene, camera);
+    };
+
+    rafId = requestAnimationFrame(animate);
+
+    const handleResize = () => {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    };
+    window.addEventListener('resize', handleResize);
+
+    return () => {
+      isDisposed = true;
+      cancelAnimationFrame(rafId);
+      window.removeEventListener('resize', handleResize);
+      domEl.removeEventListener('pointerdown', handlePointerDown);
+      domEl.removeEventListener('pointermove', handlePointerMove);
+      domEl.removeEventListener('pointerup', handlePointerUp);
+      domEl.removeEventListener('dblclick', handleDoubleClick);
+      controls.dispose();
+      sculpted.dispose();
+      Object.values(boneMaterialsById).forEach((m) => m.dispose());
+      boneBaseMat.dispose();
+      skinShellMat.dispose();
+      gridHelper.dispose();
+      ringGeom.dispose();
+      ringMat.dispose();
+      renderer.dispose();
+      if (domEl.parentNode === container) {
+        container.removeChild(domEl);
+      }
+    };
+  }, [onModelReady, onModelError]);
+
+  const hoveredPart = hoveredId ? PARTS_BY_ID[hoveredId] : null;
+  const pinList: PinScreenPos[] = ANATOMY_PARTS.filter(
+    (p) => p.id !== 'skin_envelope'
+  ).map((p) => ({
+    id: p.id,
+    x: 0,
+    y: 0,
+    visible: false,
+  }));
+
+  return (
+    <>
+      <div
+        id="canvas-viewport"
+        ref={mountRef}
+        className={hoveredId ? 'hovering-part' : ''}
+        aria-label="Interactive 3D Human Anatomy Viewport — Click any structure to inspect, double-click to isolate in 360°"
+      />
+
+      {/* X-Ray Fluoroscopy Grid */}
+      <div
+        className={`xray-grid-overlay ${imagingMode === 'xray' ? 'active' : ''}`}
+        aria-hidden="true"
+      />
+
+      {/* 3D Projected Part Pins */}
+      <div className="pins-overlay" ref={pinsRef}>
+        {pinList.map((pin) => {
+          const part = PARTS_BY_ID[pin.id];
+          const sysColor = SYSTEM_MAP[part.system]?.color ?? '#38bdf8';
+          const isSelected =
+            selectedPartId === pin.id || isolatedPartId === pin.id;
+          return (
+            <button
+              key={pin.id}
+              type="button"
+              data-part-id={pin.id}
+              className={`anatomy-pin ${isSelected ? 'selected' : ''}`}
+              style={{ display: 'none' }}
+              onClick={(e) => {
+                e.stopPropagation();
+                onSelectPart(pin.id);
+              }}
+              onDoubleClick={(e) => {
+                e.stopPropagation();
+                onIsolatePart(pin.id);
+              }}
+            >
+              <span
+                className="pin-indicator"
+                style={{ backgroundColor: sysColor, boxShadow: `0 0 8px ${sysColor}` }}
+              />
+              <span>{part.shortLabel}</span>
+            </button>
+          );
+        })}
+      </div>
+
+      {/* Live 3D Raycast Hover Tooltip */}
+      {hoveredPart && (
+        <div
+          className="raycast-tooltip"
+          style={{
+            left: Math.min(window.innerWidth - 295, hoverScreenPos.x + 16),
+            top: Math.max(76, hoverScreenPos.y - 16),
+          }}
+        >
+          <div
+            style={{
+              fontFamily: 'var(--font-mono)',
+              fontSize: '9.5px',
+              color: SYSTEM_MAP[hoveredPart.system]?.color ?? '#38bdf8',
+              letterSpacing: '0.08em',
+              textTransform: 'uppercase',
+              marginBottom: '2px',
+            }}
+          >
+            {hoveredPart.systemSublabel}
+          </div>
+          <div style={{ fontWeight: 700, fontSize: '13px', color: '#fff' }}>
+            {hoveredPart.nameEn}
+          </div>
+          <div
+            style={{
+              fontSize: '12px',
+              color: '#38bdf8',
+              marginTop: '1px',
+            }}
+          >
+            {hoveredPart.nameBn}
+          </div>
+          <div
+            style={{
+              fontFamily: 'var(--font-mono)',
+              fontSize: '10px',
+              color: '#94a3b8',
+              marginTop: '4px',
+            }}
+          >
+            Click to inspect • Double-click to 360° isolate
+          </div>
+        </div>
+      )}
+    </>
+  );
+};
