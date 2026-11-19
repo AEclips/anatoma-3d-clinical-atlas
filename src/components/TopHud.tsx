@@ -93,7 +93,7 @@ export const TopHud: React.FC<TopHudProps> = ({
         {/* Left: Brand & Live Physiological Telemetry */}
         <div className="hud-brand glass-panel">
           <div className="hud-logo-dot" />
-          <span className="hud-brand-title">ANATOMA 3D</span>
+          <span className="hud-brand-title">মানবদেহ ৩ডি</span>
           <span className="hud-telemetry-pill">
             {Math.round(scrollProgress * 100)}%
           </span>

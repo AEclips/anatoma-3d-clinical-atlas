@@ -1,4 +1,4 @@
-# ANATOMA 3D // Clinical Human Anatomy Atlas v2.0
+# মানবদেহ ৩ডি // Manobdeho 3D — Interactive Human Anatomy Atlas
 
 Interactive 3D multi-system human anatomy dissection explorer built with **React**, **TypeScript**, **Three.js**, and **Vite**, featuring bilingual (Bengali & English) clinical profiles and *Terminologia Anatomica* Latin terminology.
 

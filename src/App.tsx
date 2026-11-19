@@ -292,7 +292,7 @@ export const App: React.FC = () => {
                   color: '#fff',
                 }}
               >
-                ANATOMA 3D // CLINICAL ATLAS v2.0
+                মানবদেহ ৩ডি // MANOBDEHO 3D
               </div>
               <div style={{ fontSize: '13px', color: '#94a3b8' }}>
                 রিয়েল ৩ডি কঙ্কাল, অভ্যন্তরীণ অঙ্গ, পেশী ও স্নায়ুতন্ত্র লোড হচ্ছে...
